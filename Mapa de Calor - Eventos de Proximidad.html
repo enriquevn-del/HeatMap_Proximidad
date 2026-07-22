@@ -142,8 +142,19 @@ body {
   background: var(--brand-tint2);
   gap: 10px;
   flex-wrap: wrap;
+  position: relative;
 }
 .card-header-title { font-size: 13.5px; font-weight: 700; color: #2a2a2a; display: flex; align-items: center; gap: 7px; }
+.oldest-date-info {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 12px;
+  font-weight: 600;
+  color: #555;
+  white-space: nowrap;
+}
 
 .map-body { padding: 14px; background: #FCFCFC; }
 .map-wrap { position: relative; width: 100%; }
@@ -241,6 +252,7 @@ footer.note { font-size: 11px; color: #aaa; text-align: center; padding: 6px 0 1
     <div class="card">
       <div class="card-header">
         <div class="card-header-title">🗺️ Mapa de calor — plano del site</div>
+        <div class="oldest-date-info" id="oldestDateInfo"></div>
       </div>
       <div class="map-body">
         <div class="map-wrap">
@@ -265,8 +277,8 @@ footer.note { font-size: 11px; color: #aaa; text-align: center; padding: 6px 0 1
             <tr>
               <th style="width:70px">Zona</th>
               <th>Nombre de zona</th>
-              <th style="width:170px">Tiempo acum. Warning (s)</th>
-              <th style="width:150px">Tiempo acum. Alert (s)</th>
+              <th style="width:170px">Tiempo acum. Warning</th>
+              <th style="width:150px">Tiempo acum. Alert</th>
               <th style="width:70px">Activa</th>
             </tr>
           </thead>
@@ -354,6 +366,8 @@ let minScore = 0, maxScore = 0;
 let bgImage = document.getElementById('bgImage');
 let bgImageReady = false;
 let fileNameCache = '';
+let oldestBreachDate = null;
+let newestBreachDate = null;
 
 bgImage.addEventListener('load', () => { bgImageReady = true; });
 if (bgImage.complete && bgImage.naturalWidth > 0) bgImageReady = true;
@@ -416,7 +430,7 @@ function loadFile(file) {
   const reader = new FileReader();
   reader.onload = e => {
     try {
-      const wb = XLSX.read(new Uint8Array(e.target.result), { type: 'array' });
+      const wb = XLSX.read(new Uint8Array(e.target.result), { type: 'array', cellDates: true });
       fileNameCache = file.name;
       processWorkbook(wb);
     } catch (err) {
@@ -430,7 +444,8 @@ function loadFile(file) {
 const REQUIRED_HEADERS = {
   location: ['breach location', 'location'],
   type: ['breach type', 'type'],
-  duration: ['breach duration (sec)', 'breach duration', 'duration (sec)', 'duration']
+  duration: ['breach duration (sec)', 'breach duration', 'duration (sec)', 'duration'],
+  date: ['breach date', 'date']
 };
 
 function normHeader(v) { return String(v ?? '').trim().toLowerCase(); }
@@ -458,6 +473,18 @@ function findSheetAndHeaders(wb) {
   return null;
 }
 
+function parseBreachDate(raw) {
+  if (raw === undefined || raw === null || raw === '') return null;
+  if (raw instanceof Date) return isNaN(raw.getTime()) ? null : raw;
+  if (typeof raw === 'number') {
+    const parsed = XLSX.SSF.parse_date_code(raw);
+    if (!parsed) return null;
+    return new Date(parsed.y, parsed.m - 1, parsed.d, parsed.H || 0, parsed.M || 0, parsed.S || 0);
+  }
+  const d = new Date(String(raw).trim());
+  return isNaN(d.getTime()) ? null : d;
+}
+
 function resolveZoneKey(rawLocation) {
   const text = String(rawLocation ?? '').trim();
   if (!text) return 'UNKNOWN';
@@ -480,6 +507,8 @@ function processWorkbook(wb) {
   const unk = { warning: 0, alert: 0, score: 0, count: 0 };
 
   let totalRows = 0;
+  let oldestDate = null;
+  let newestDate = null;
   for (let r = headerRow + 1; r < rows.length; r++) {
     const row = rows[r];
     if (!row || row.length === 0) continue;
@@ -489,6 +518,12 @@ function processWorkbook(wb) {
     if ((locRaw === undefined || locRaw === '') && (typeRaw === undefined || typeRaw === '')) continue;
 
     totalRows++;
+
+    if (colIdx.date !== undefined) {
+      const parsedDate = parseBreachDate(row[colIdx.date]);
+      if (parsedDate && (!oldestDate || parsedDate < oldestDate)) oldestDate = parsedDate;
+      if (parsedDate && (!newestDate || parsedDate > newestDate)) newestDate = parsedDate;
+    }
 
     let dur = Number(durRaw);
     if (!isFinite(dur)) dur = 0;
@@ -523,6 +558,8 @@ function processWorkbook(wb) {
 
   zoneResults = agg;
   unknownResult = unk;
+  oldestBreachDate = oldestDate;
+  newestBreachDate = newestDate;
 
   renderAll(totalRows);
 }
@@ -584,12 +621,15 @@ function renderAll(totalRows) {
     <div class="stat-pill"><div class="num">${unknownResult.count}</div><div class="lbl">Registros Unknown</div></div>
   `;
 
+  document.getElementById('oldestDateInfo').textContent = formatDateRangeEs();
+
   const tbody = document.getElementById('summaryBody');
   tbody.innerHTML = '';
 
   sortedZoneNums().forEach(num => {
     const z = ZONE_DATA[num];
     const res = zoneResults[num];
+    if (res.score === 0) return;
     const tr = document.createElement('tr');
     if (!zoneActive[num]) tr.classList.add('inactive-row');
     const dot = res.color ? `<span class="color-dot" style="background:${res.color}"></span>` : `<span class="color-dot" style="background:#fff"></span>`;
@@ -636,9 +676,23 @@ function sortedZoneNums() {
   });
 }
 
+function formatDateEs(d) {
+  const pad = n => String(n).padStart(2, '0');
+  return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+function formatDateRangeEs() {
+  if (!oldestBreachDate || !newestBreachDate) return '';
+  return `${formatDateEs(oldestBreachDate)} - ${formatDateEs(newestBreachDate)}`;
+}
+
 function formatSec(v) {
-  const r = Math.round(v * 10) / 10;
-  return (r % 1 === 0) ? r.toFixed(0) : r.toFixed(1);
+  const total = Math.round(v);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const pad = n => String(n).padStart(2, '0');
+  return `${pad(h)}:${pad(m)}:${pad(s)}`;
 }
 
 /* ===================== Exportación a PDF ===================== */
@@ -661,11 +715,10 @@ document.getElementById('btnDownload').addEventListener('click', async () => {
     doc.setTextColor(0, 100, 78);
     doc.text('Mapa de Calor — Eventos de Proximidad', pW / 2, 12, { align: 'center' });
 
-    const now = new Date();
     doc.setFontSize(8);
     doc.setFont('helvetica', 'normal');
     doc.setTextColor(120, 120, 120);
-    doc.text(`Archivo: ${fileNameCache || '—'}   |   Generado: ${now.toLocaleDateString('es-MX')} ${now.toLocaleTimeString('es-MX')}`, pW / 2, 17, { align: 'center' });
+    doc.text(formatDateRangeEs() || '—', pW / 2, 17, { align: 'center' });
 
     doc.setDrawColor(210, 210, 210);
     doc.setLineWidth(0.3);
@@ -708,7 +761,7 @@ document.getElementById('btnDownload').addEventListener('click', async () => {
     let tableY = 20;
 
     function drawHeaderRow(y) {
-      const headers = ['Zona', 'Nombre de zona', 'Tiempo acum.\nWarning (s)', 'Tiempo acum.\nAlert (s)', 'Intensidad'];
+      const headers = ['Zona', 'Nombre de zona', 'Tiempo acum.\nWarning', 'Tiempo acum.\nAlert', 'Intensidad'];
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(8);
       doc.setTextColor(0, 100, 78);
@@ -732,9 +785,11 @@ document.getElementById('btnDownload').addEventListener('click', async () => {
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(8);
 
-    const allRows = sortedZoneNums().map(num => ({
-      num: String(num), name: ZONE_DATA[num].name, res: zoneResults[num]
-    }));
+    const allRows = sortedZoneNums()
+      .filter(num => zoneResults[num].score !== 0)
+      .map(num => ({
+        num: String(num), name: ZONE_DATA[num].name, res: zoneResults[num]
+      }));
     if (unknownResult.count > 0) {
       allRows.push({ num: '—', name: 'Unknown', res: unknownResult });
     }
